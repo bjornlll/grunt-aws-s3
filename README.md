@@ -1,5 +1,17 @@
 # grunt-aws-s3
 
+## Features added in this fork
+- options.gzip: Enabled on-the-fly gzip support in uploads, also sets Content-Encoding header
+- options.gzipExclude: Exclude file extensions from gzipping e.g. ['.png', '.jpeg']
+- options.mime: If 'mime' is a string instead of an object the mime-type will be applied to all uploads for that task
+- Override task options by providing an options object on the objects in 'files', supports overriding of:
+  - bucket
+  - access
+  - gzip
+  - gzipExclude
+  - mime
+  - params
+
 > Upload files to AWS S3 using AWS SDK
 
 ## Getting Started
