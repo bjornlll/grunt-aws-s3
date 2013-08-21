@@ -19,7 +19,53 @@ var mime = require('mime');
 module.exports = function (grunt) {
 
 	grunt.registerMultiTask('aws_s3', 'Upload files to AWS S3', function() {
-		
+
+		function verifyParams(params) {
+			if (params) {
+				if (!grunt.util._.every(grunt.util._.keys(params),
+					function(key) { return grunt.util._.contains(put_params, key); })) {
+					grunt.warn("params can only be " + put_params.join(', '));
+				}
+			}
+		}
+
+		var overrideOptions = (function() {
+
+			function mime(task, local) {
+				if (grunt.util._.isString(local)) {
+					return local;
+				} else if (grunt.util._.isObject(local)) {
+					return grunt.util._.extend(
+						{},
+						(grunt.util._.isString(task) ? {} : task),
+						local
+					);
+				} else {
+					return task;
+				}
+			}
+
+			function params(task, local) {
+				var params = grunt.util._.extend({}, task, local);
+				verifyParams(params);
+				return params;
+			}
+
+			return function overrideOptions(taskOptions, localOptions) {
+				var obj = localOptions ? {
+					bucket: localOptions.bucket || taskOptions.bucket,
+					access: localOptions.access || taskOptions.access,
+					gzip: localOptions.gzip !== undefined ? localOptions.gzip : taskOptions.gzip,
+					gzipExclude: localOptions.gzipExclude || taskOptions.gzipExclude,
+					mime: mime(taskOptions.mime, localOptions.mime),
+					params: params(taskOptions.params, localOptions.params)
+				} : taskOptions;
+
+				return obj;
+			}
+
+		})();
+
 		var done = this.async();
 
 		var options = this.options({
@@ -61,14 +107,7 @@ module.exports = function (grunt) {
 			s3_options.region = options.region;
 		}
 
-		if (options.params) {
-			
-			if (!grunt.util._.every(grunt.util._.keys(options.params), 
-				function(key) { return grunt.util._.contains(put_params, key); })) {
-
-				grunt.warn("params can only be " + put_params.join(', '));
-			}
-		}
+		verifyParams(options.params);
 
 		var s3 = new AWS.S3(s3_options);
 
@@ -78,7 +117,6 @@ module.exports = function (grunt) {
 
 		this.files.forEach(function (filePair) {
 
-
 			if (filePair.action === 'delete') {
 
 				if (!filePair.dest) {
@@ -86,9 +124,12 @@ module.exports = function (grunt) {
 				}
 
 				dest = (filePair.dest === '/') ? '' : filePair.dest;
-				objects.push({dest: dest, action: 'delete'})
-			}
-			else {
+				objects.push({
+					dest: dest,
+					action: 'delete',
+					options: overrideOptions(options, filePair.orig.options)
+				})
+			} else {
 
 				isExpanded = filePair.orig.expand || false;
 
@@ -104,14 +145,18 @@ module.exports = function (grunt) {
 					// '.' means that no dest path has been given (root).
 					// We do not need to create a '.' folder
 					if (dest !== '.') {
-						objects.push({src: src, dest: dest, action: 'upload'});
+						objects.push({
+							src: src,
+							dest: dest, action: 'upload',
+							options: overrideOptions(options, filePair.orig.options)
+						});
 					}
 				});
 			}
 		});
 
 		var deleteObjects = function (task, callback) {
-			
+
 			var clear = {
 				Prefix: task.dest, 
 				Bucket: options.bucket
@@ -143,6 +188,8 @@ module.exports = function (grunt) {
 
 		var uploadObject = function (task, callback) {
 
+			var options = task.options;
+
 			function getContentType(options, task) {
 				return grunt.util._.isString(options.mime)
 					? options.mime
@@ -162,12 +209,13 @@ module.exports = function (grunt) {
 				});
 			}
 
-			function shouldBeIncluded(task) {
+			function shouldBeIncluded(options, task) {
 				return options.gzipExclude.every(function(ext) { return task.src.indexOf(ext) === -1; });
 			}
 
-			function put(upload, callback) {
-				s3.putObject(upload, function (err, data) {
+			function put(options, upload, callback) {
+				var awsPutObjectParameters = grunt.util._.extend({}, options.params || {}, upload);
+				s3.putObject(awsPutObjectParameters, function (err, data) {
 					callback(err, data);
 				});
 			}
@@ -176,14 +224,14 @@ module.exports = function (grunt) {
 				if (!grunt.util._.endsWith(task.dest, '/')) {
 					task.dest = task.dest + '/';
 				}
-				put({
+				put({}, {
 					Key: task.dest,
 					Bucket: options.bucket,
 					ACL: options.access
 				}, callback);
-			} else if (options.gzip && shouldBeIncluded(task)) {
+			} else if (options.gzip && shouldBeIncluded(options, task)) {
 				gzip(task, function(task, tmp) {
-					put({
+					put(task.options, {
 						ContentType: getContentType(options, task),
 						ContentEncoding: 'gzip',
 						Body: grunt.file.read(task.src, {encoding: null}),
@@ -196,7 +244,7 @@ module.exports = function (grunt) {
 					})
 				});
 			} else {
-				put({
+				put(task.options, {
 					ContentType: getContentType(options, task),
 					Body: grunt.file.read(task.src, {encoding: null}),
 					Key: task.dest,
