@@ -22,12 +22,16 @@ module.exports = function (grunt) {
 		
 		var done = this.async();
 
+		console.log(this);
+
 		var options = this.options({
 			access: 'public-read',
 			accessKeyId: process.env.AWS_ACCESS_KEY_ID,
 			secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
 			concurrency: 1,
-			mime: {}
+			mime: {},
+			gzip: false,
+			gzipExclude: []
 		});
 
 		var put_params = ['CacheControl', 'ContentDisposition', 'ContentEncoding', 
@@ -153,6 +157,10 @@ module.exports = function (grunt) {
 				});
 			}
 
+			function shouldBeExcluded(task) {
+				options.gzipExclude.some(function(ext) { return task.src.indexOf(ext) !== -1; });
+			}
+
 			function put(upload, callback) {
 				s3.putObject(upload, function (err, data) {
 					callback(err, data);
@@ -168,12 +176,11 @@ module.exports = function (grunt) {
 					Bucket: options.bucket,
 					ACL: options.access
 				}, callback);
-			} else if (options.gzip) {
+			} else if (options.gzip && shouldBeExcluded(task) === false) {
 				gzip(task, function(task, tmp) {
 					put({
 						ContentType: options.mime[task.srcOrig] || mime.lookup(task.srcOrig),
 						ContentEncoding: 'gzip',
-						CacheControl: 'max-age=2000',
 						Body: grunt.file.read(task.src, {encoding: null}),
 						Key: task.dest,
 						Bucket: options.bucket,
@@ -248,7 +255,6 @@ module.exports = function (grunt) {
 				}
 			}
 			else {
-				
 				if (err) {
 					grunt.fatal('Failed to upload ' + this.data.src.toString().cyan + ' to ' + objectURL.toString().cyan + ".\n" + err.toString().red);
 				}
