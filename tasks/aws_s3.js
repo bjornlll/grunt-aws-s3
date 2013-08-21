@@ -143,6 +143,12 @@ module.exports = function (grunt) {
 
 		var uploadObject = function (task, callback) {
 
+			function getContentType(options, task) {
+				return grunt.util._.isString(options.mime)
+					? options.mime
+					: (options.mime[task.srcOrig || task.src] || mime.lookup(task.srcOrig || task.src));
+			}
+
 			function gzip(task, callback) {
 				var tmp = new tmpfile(),
 					input = fs.createReadStream(task.src),
@@ -178,7 +184,7 @@ module.exports = function (grunt) {
 			} else if (options.gzip && shouldBeIncluded(task)) {
 				gzip(task, function(task, tmp) {
 					put({
-						ContentType: grunt.util._.isString(options.mime) ? options.mime : (options.mime[task.srcOrig] || mime.lookup(task.srcOrig)),
+						ContentType: getContentType(options, task),
 						ContentEncoding: 'gzip',
 						Body: grunt.file.read(task.src, {encoding: null}),
 						Key: task.dest,
@@ -191,8 +197,7 @@ module.exports = function (grunt) {
 				});
 			} else {
 				put({
-					ContentType: options.mime[task.src] || mime.lookup(task.src),
-					CacheControl: 'max-age=3000',
+					ContentType: getContentType(options, task),
 					Body: grunt.file.read(task.src, {encoding: null}),
 					Key: task.dest,
 					Bucket: options.bucket,
