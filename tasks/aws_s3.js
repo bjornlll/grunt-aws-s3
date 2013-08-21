@@ -7,7 +7,10 @@
  */
 
 'use strict';
+var zlib = require('zlib');
+var tmpfile = require('temporary/lib/file');
 
+// Local
 var path = require('path');
 var fs = require('fs');
 var AWS = require('aws-sdk');
@@ -136,38 +139,61 @@ module.exports = function (grunt) {
 		}
 
 		var uploadObject = function (task, callback) {
-			
-			var upload;
+
+			function gzip(task, callback) {
+				var tmp = new tmpfile(),
+					input = fs.createReadStream(task.src),
+					output = fs.createWriteStream(tmp.path);
+				task.srcOrig = task.src;
+				input.pipe(zlib.createGzip()).pipe(output).on('error', function (err) {
+					grunt.fail.warn("Upload failed", err);
+				}).on('close', function () {
+					task.src = tmp.path;
+					callback(task, tmp);
+				});
+			}
+
+			function put(upload, callback) {
+				s3.putObject(upload, function (err, data) {
+					callback(err, data);
+				});
+			}
 
 			if (grunt.file.isDir(task.src)) {
-				
 				if (!grunt.util._.endsWith(task.dest, '/')) {
 					task.dest = task.dest + '/';
 				}
-
-				upload = {
-					Key: task.dest, 
-					Bucket: options.bucket, 
+				put({
+					Key: task.dest,
+					Bucket: options.bucket,
 					ACL: options.access
-				};
-			}
-			else {
-
-				var type = options.mime[task.src] || mime.lookup(task.src);
-				var buffer = grunt.file.read(task.src, {encoding: null});
-				
-				upload = {
-					ContentType: type, 
-					Body: buffer, 
-					Key: task.dest, 
-					Bucket: options.bucket, 
+				}, callback);
+			} else if (options.gzip) {
+				gzip(task, function(task, tmp) {
+					put({
+						ContentType: options.mime[task.srcOrig] || mime.lookup(task.srcOrig),
+						ContentEncoding: 'gzip',
+						CacheControl: 'max-age=2000',
+						Body: grunt.file.read(task.src, {encoding: null}),
+						Key: task.dest,
+						Bucket: options.bucket,
+						ACL: options.access
+					}, function(err, data) {
+						tmp.unlinkSync();
+						callback(err, data);
+					})
+				});
+			} else {
+				put({
+					ContentType: options.mime[task.src] || mime.lookup(task.src),
+					CacheControl: 'max-age=3000',
+					Body: grunt.file.read(task.src, {encoding: null}),
+					Key: task.dest,
+					Bucket: options.bucket,
 					ACL: options.access
-				};
+				}, callback);
 			}
 
-			s3.putObject(upload, function (err, data) {
-				callback(err, data);
-			});
 		}
 
 		var queue = grunt.util.async.queue(function (task, callback) {
@@ -181,7 +207,7 @@ module.exports = function (grunt) {
 		}, options.concurrency);
 
 		queue.drain = function () {
-			var tally = grunt.util._.groupBy(objects, 'action')
+			var tally = grunt.util._.groupBy(objects, 'action');
 
 			if (tally.upload) {
 				grunt.log.writeln('\n' + tally.upload.length.toString().green + ' objects uploaded on the bucket ' + options.bucket.toString().green);				
