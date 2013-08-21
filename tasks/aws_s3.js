@@ -22,8 +22,6 @@ module.exports = function (grunt) {
 		
 		var done = this.async();
 
-		console.log(this);
-
 		var options = this.options({
 			access: 'public-read',
 			accessKeyId: process.env.AWS_ACCESS_KEY_ID,
@@ -79,7 +77,8 @@ module.exports = function (grunt) {
 		var objects = [];
 
 		this.files.forEach(function (filePair) {
-			
+
+
 			if (filePair.action === 'delete') {
 
 				if (!filePair.dest) {
@@ -157,8 +156,8 @@ module.exports = function (grunt) {
 				});
 			}
 
-			function shouldBeExcluded(task) {
-				options.gzipExclude.some(function(ext) { return task.src.indexOf(ext) !== -1; });
+			function shouldBeIncluded(task) {
+				return options.gzipExclude.every(function(ext) { return task.src.indexOf(ext) === -1; });
 			}
 
 			function put(upload, callback) {
@@ -176,10 +175,10 @@ module.exports = function (grunt) {
 					Bucket: options.bucket,
 					ACL: options.access
 				}, callback);
-			} else if (options.gzip && shouldBeExcluded(task) === false) {
+			} else if (options.gzip && shouldBeIncluded(task)) {
 				gzip(task, function(task, tmp) {
 					put({
-						ContentType: options.mime[task.srcOrig] || mime.lookup(task.srcOrig),
+						ContentType: grunt.util._.isString(options.mime) ? options.mime : (options.mime[task.srcOrig] || mime.lookup(task.srcOrig)),
 						ContentEncoding: 'gzip',
 						Body: grunt.file.read(task.src, {encoding: null}),
 						Key: task.dest,
