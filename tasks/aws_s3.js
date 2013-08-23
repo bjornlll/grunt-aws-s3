@@ -15,10 +15,20 @@ var path = require('path');
 var fs = require('fs');
 var AWS = require('aws-sdk');
 var mime = require('mime');
+var crypto = require('crypto');
 
 module.exports = function (grunt) {
 
 	grunt.registerMultiTask('aws_s3', 'Upload files to AWS S3', function() {
+
+		function md5(src, callback) {
+			fs.readFile(src, function(err, data) {
+				if (err) {
+					grunt.fail.fatal('Could not compute MD5 of file', err);
+				}
+				callback(crypto.createHash('md5').update(data).digest('hex'));
+			});
+		}
 
 		function verifyParams(params) {
 			if (params) {
@@ -46,22 +56,25 @@ module.exports = function (grunt) {
 			}
 
 			function params(task, local) {
+				var metadata = grunt.util._.extend({}, task.Metadata || {}, local.Metadata || {});
 				var params = grunt.util._.extend({}, task, local);
+				params.Metadata = metadata;
 				verifyParams(params);
 				return params;
 			}
 
 			return function overrideOptions(taskOptions, localOptions) {
-				var obj = localOptions ? {
+				return localOptions ? {
 					bucket: localOptions.bucket || taskOptions.bucket,
 					access: localOptions.access || taskOptions.access,
-					gzip: localOptions.gzip !== undefined ? localOptions.gzip : taskOptions.gzip,
+					gzip: localOptions.gzip !== undefined
+						? localOptions.gzip : taskOptions.gzip,
 					gzipExclude: localOptions.gzipExclude || taskOptions.gzipExclude,
+					verifyMD5: localOptions.verifyMD5 !== undefined
+						? localOptions.verifyMD5 : taskOptions.verifyMD5,
 					mime: mime(taskOptions.mime, localOptions.mime),
 					params: params(taskOptions.params, localOptions.params)
 				} : taskOptions;
-
-				return obj;
 			}
 
 		})();
@@ -75,11 +88,12 @@ module.exports = function (grunt) {
 			concurrency: 1,
 			mime: {},
 			gzip: false,
-			gzipExclude: []
+			gzipExclude: [],
+			verifyMD5: false
 		});
 
 		var put_params = ['CacheControl', 'ContentDisposition', 'ContentEncoding', 
-		'ContentLanguage', 'ContentLength', 'ContentMD5', 'Expires', 'GrantFullControl', 
+		'ContentLanguage', 'ContentLength', 'Expires', 'GrantFullControl',
 		'GrantRead', 'GrantReadACP', 'GrantWriteACP', 'Metadata', 'ServerSideEncryption', 
 		'StorageClass', 'WebsiteRedirectLocation'];
 		
@@ -116,19 +130,24 @@ module.exports = function (grunt) {
 		var objects = [];
 
 		this.files.forEach(function (filePair) {
-
+			var optionsOverride = overrideOptions(options, filePair.orig.options);
 			if (filePair.action === 'delete') {
-
 				if (!filePair.dest) {
 					grunt.fatal('No "dest" specified for deletion. No need to specify a "src"');
 				}
-
 				dest = (filePair.dest === '/') ? '' : filePair.dest;
 				objects.push({
 					dest: dest,
 					action: 'delete',
-					options: overrideOptions(options, filePair.orig.options)
+					options: optionsOverride
 				})
+			} else if (filePair.action === 'download') {
+				objects.push({
+					dest: filePair.orig.dest,
+					src: filePair.orig.src[0],
+					options: optionsOverride,
+					action: 'download'
+				});
 			} else {
 
 				isExpanded = filePair.orig.expand || false;
@@ -147,8 +166,9 @@ module.exports = function (grunt) {
 					if (dest !== '.') {
 						objects.push({
 							src: src,
-							dest: dest, action: 'upload',
-							options: overrideOptions(options, filePair.orig.options)
+							dest: dest,
+							action: 'upload',
+							options: optionsOverride
 						});
 					}
 				});
@@ -202,7 +222,7 @@ module.exports = function (grunt) {
 					output = fs.createWriteStream(tmp.path);
 				task.srcOrig = task.src;
 				input.pipe(zlib.createGzip()).pipe(output).on('error', function (err) {
-					grunt.fail.warn("Upload failed", err);
+					grunt.fail.warn("Gzipping failed", err);
 				}).on('close', function () {
 					task.src = tmp.path;
 					callback(task, tmp);
@@ -213,12 +233,40 @@ module.exports = function (grunt) {
 				return options.gzipExclude.every(function(ext) { return task.src.indexOf(ext) === -1; });
 			}
 
-			function put(options, upload, callback) {
-				var awsPutObjectParameters = grunt.util._.extend({}, options.params || {}, upload);
-				s3.putObject(awsPutObjectParameters, function (err, data) {
-					callback(err, data);
-				});
-			}
+			var put = (function() {
+
+				function dispatch(params, callback) {
+					s3.putObject(params, function (err, data) {
+						callback(err, data);
+					});
+				}
+
+				return function put(options, upload, callback) {
+					var awsPutObjectParameters = grunt.util._.extend({}, options.params || {}, upload);
+					if (awsPutObjectParameters.Body !== undefined && options.verifyMD5 === true) {
+						s3.headObject({Key: awsPutObjectParameters.Key, Bucket: awsPutObjectParameters.Bucket}, function(err, data) {
+							if (err) {
+								if (err.statusCode === 404) {
+									dispatch(awsPutObjectParameters, callback);
+								} else {
+									grunt.fail.warn('Could not get HTTP header of object ' + awsPutObjectParameters.Key, err);
+								}
+							} else {
+								if (awsPutObjectParameters.Metadata.md5 === data.Metadata.md5) {
+									// The remote object has not changed
+									callback(null, null, 'not-changed');
+								} else {
+									// The content has changed, proceeed with the upload
+									dispatch(awsPutObjectParameters, callback);
+								}
+							}
+						});
+					} else {
+						dispatch(awsPutObjectParameters, callback);
+					}
+
+				}
+			})();
 
 			if (grunt.file.isDir(task.src)) {
 				if (!grunt.util._.endsWith(task.dest, '/')) {
@@ -229,38 +277,42 @@ module.exports = function (grunt) {
 					Bucket: options.bucket,
 					ACL: options.access
 				}, callback);
-			} else if (options.gzip && shouldBeIncluded(options, task)) {
-				gzip(task, function(task, tmp) {
-					put(task.options, {
-						ContentType: getContentType(options, task),
-						ContentEncoding: 'gzip',
-						Body: grunt.file.read(task.src, {encoding: null}),
-						Key: task.dest,
-						Bucket: options.bucket,
-						ACL: options.access
-					}, function(err, data) {
-						tmp.unlinkSync();
-						callback(err, data);
-					})
-				});
 			} else {
-				put(task.options, {
-					ContentType: getContentType(options, task),
-					Body: grunt.file.read(task.src, {encoding: null}),
-					Key: task.dest,
-					Bucket: options.bucket,
-					ACL: options.access
-				}, callback);
-			}
 
+				md5(task.src, function(result) {
+					(options.params.Metadata = options.params.Metadata || {})['md5'] = result;
+					if (options.gzip && shouldBeIncluded(options, task)) {
+						gzip(task, function(task, tmp) {
+							put(options, {
+								ContentType: getContentType(options, task),
+								ContentEncoding: 'gzip',
+								Body: grunt.file.read(task.src, {encoding: null}),
+								Key: task.dest,
+								Bucket: options.bucket,
+								ACL: options.access,
+							}, function(err, data, status) {
+								tmp.unlinkSync();
+								callback(err, data, status);
+							})
+						});
+					} else {
+						put(options, {
+							ContentType: getContentType(options, task),
+							Body: grunt.file.read(task.src, {encoding: null}),
+							Key: task.dest,
+							Bucket: options.bucket,
+							ACL: options.access,
+						}, callback);
+					}
+				});
+			}
 		}
 
 		var queue = grunt.util.async.queue(function (task, callback) {
 			
 			if (task.action === 'delete') {
 				deleteObjects(task, callback);
-			}
-			else {
+			} else {
 				uploadObject(task, callback);
 			}
 		}, options.concurrency);
@@ -269,7 +321,7 @@ module.exports = function (grunt) {
 			var tally = grunt.util._.groupBy(objects, 'action');
 
 			if (tally.upload) {
-				grunt.log.writeln('\n' + tally.upload.length.toString().green + ' objects uploaded on the bucket ' + options.bucket.toString().green);				
+				grunt.log.writeln('\n' + tally.upload.length.toString().green + ' objects processed on bucket ' + options.bucket.toString().green);
 			}
 
 			grunt.util._.each(tally['delete'], function (del) {
@@ -279,22 +331,18 @@ module.exports = function (grunt) {
 			done();
 		};
 
-		queue.push(objects, function (err, res) {
-
+		queue.push(objects, function (err, res, status) {
 			var objectURL = s3.endpoint.href + options.bucket + '/' + this.data.dest;
 
 			if (this.data.action === 'delete') {
 				
 				if (err) {
-					
 					if (res && res.Errors.length > 0) {
 						grunt.writeln('Errors (' + res.Errors.length.toString().red + ' objects): ' + grunt.util._.pluck(res.Errors, 'Key').join(', ').toString().red);
 					}
-
 					grunt.fatal('Failed to delete content of ' + objectURL + '\n' + err);
 				}
 				else {
-
 					if (res) {
 						grunt.log.writeln('Successfuly deleted the content of ' + objectURL.toString().cyan);
 						grunt.log.writeln('List: (' + res.Deleted.length.toString().cyan + ' objects): '+ grunt.util._.pluck(res.Deleted, 'Key').join(', ').toString().cyan);
@@ -305,13 +353,13 @@ module.exports = function (grunt) {
 						this.data.nb_objects = 0;
 					}
 				}
-			}
-			else {
+			} else {
 				if (err) {
 					grunt.fatal('Failed to upload ' + this.data.src.toString().cyan + ' to ' + objectURL.toString().cyan + ".\n" + err.toString().red);
-				}
-				else {
-					grunt.log.writeln(this.data.src.toString().cyan + ' uploaded to ' + objectURL.toString().cyan);
+				} else if (status && status == 'not-changed') {
+					grunt.log.ok('Unchanged: ' + this.data.dest.grey);
+				} else {
+					grunt.log.ok('Uploaded:  ' + this.data.dest.cyan);
 				}
 			}
 		});

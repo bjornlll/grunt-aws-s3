@@ -12,8 +12,6 @@
   - mime
   - params
 
-> Upload files to AWS S3 using AWS SDK
-
 ## Getting Started
 This plugin requires Grunt `~0.4.0`
 
