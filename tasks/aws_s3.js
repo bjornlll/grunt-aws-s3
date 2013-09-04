@@ -246,7 +246,7 @@ module.exports = function (grunt) {
 					if (awsPutObjectParameters.Body !== undefined && options.verifyMD5 === true) {
 						s3.headObject({Key: awsPutObjectParameters.Key, Bucket: awsPutObjectParameters.Bucket}, function(err, data) {
 							if (err) {
-								if (err.statusCode === 404) {
+								if (err.statusCode === 404 || err.statusCode === 403) {
 									dispatch(awsPutObjectParameters, callback);
 								} else {
 									grunt.fail.warn('Could not get HTTP header of object ' + awsPutObjectParameters.Key, err);
