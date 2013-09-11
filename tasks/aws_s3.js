@@ -243,7 +243,7 @@ module.exports = function (grunt) {
 
 				return function put(options, upload, callback, md5) {
 					var awsPutObjectParameters = grunt.util._.extend({}, options.params || {}, upload);
-					awsPutObjectParameters.Metadata = grunt.util._.extend({}, options.params.Metadata || {}, upload.Metadata);
+					awsPutObjectParameters.Metadata = grunt.util._.extend({}, (options.params || {}).Metadata || {}, (upload || {}).Metadata);
 					awsPutObjectParameters.Metadata.md5 = md5;
 					if (awsPutObjectParameters.Body !== undefined && options.verifyMD5 === true) {
 						s3.headObject({Key: awsPutObjectParameters.Key, Bucket: awsPutObjectParameters.Bucket}, function(err, data) {
